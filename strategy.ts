@@ -27,6 +27,9 @@ import type { Batch, Bot, OrderInput, Pubkey } from "./vendor/agentfun-bot.ts";
 export interface Params {
   minRealSol: number;
   entryLift: number;
+  /** Skip curves that already ran past this lift: that is the top,
+   *  not the second wave. */
+  maxLift: number;
   minMarks: number;
   stakeSol: number;
   takeProfit: number;
@@ -37,6 +40,7 @@ export interface Params {
 export const DEFAULT_PARAMS: Params = {
   minRealSol: 6,
   entryLift: 0.12,
+  maxLift: 0.6,
   minMarks: 3,
   stakeSol: 0.05,
   takeProfit: 0.45,
@@ -54,6 +58,8 @@ interface CurveNote {
 export function createStrategy(params: Params): Bot {
   const notes = new Map<Pubkey, CurveNote>();
   const heldBatches = new Map<Pubkey, number>();
+  /** One ride per curve: after an exit the second wave is spent. */
+  const entered = new Set<Pubkey>();
 
   return {
     onBatch(state, batch: Batch) {
@@ -111,11 +117,12 @@ export function createStrategy(params: Params): Bot {
       for (const [mint, p] of price) {
         if (orders.length >= caps.max_orders_per_batch) break;
         if (slots <= 0) break;
-        if (held.has(mint)) continue;
+        if (held.has(mint) || entered.has(mint)) continue;
         const note = notes.get(mint);
         if (note === undefined || note.marks < params.minMarks) continue;
         if ((realSol.get(mint) ?? 0) < params.minRealSol) continue;
         if (p < note.firstPrice * (1 + params.entryLift)) continue;
+        if (p > note.firstPrice * (1 + params.maxLift)) continue;
         const curve = state.curves.get(mint);
         if (curve === undefined || curve.complete) continue;
         const cap = state.maxBuyLamports(mint);
@@ -131,6 +138,7 @@ export function createStrategy(params: Params): Bot {
         free -= amount + tx;
         slots -= 1;
         held.add(mint);
+        entered.add(mint);
       }
 
       return orders;
