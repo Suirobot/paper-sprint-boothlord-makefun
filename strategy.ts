@@ -21,19 +21,33 @@
 //
 // Deterministic by construction: no clock, no randomness; state is
 // kept in insertion-ordered maps fed only by the batch stream.
+//
+// Competition: u-boothlord-paper-pump-sprint-second-wave-rider-01
+// (make.fun, account @bangjacky). Fully paper/simulated: the bot
+// only answers batch marks with order intents for the replay.
 
 import type { Batch, Bot, OrderInput, Pubkey } from "./vendor/agentfun-bot.ts";
 
 export interface Params {
+  /** Real quote reserves (SOL) a curve must hold before it counts
+   *  as survived rather than launched. */
   minRealSol: number;
+  /** Lift above the first marked price that proves a second wave
+   *  of buying exists. */
   entryLift: number;
   /** Skip curves that already ran past this lift: that is the top,
    *  not the second wave. */
   maxLift: number;
+  /** Batches a curve must have been marked in before it is
+   *  eligible at all. */
   minMarks: number;
+  /** Fixed stake per curve, in SOL. */
   stakeSol: number;
+  /** Fractional gain at which the whole position is sold. */
   takeProfit: number;
+  /** Fractional loss at which the whole position is sold. */
   stopLoss: number;
+  /** Longest a position may be held, in batches. */
   maxHoldBatches: number;
 }
 
@@ -53,6 +67,36 @@ const LAMPORTS = 1_000_000_000;
 interface CurveNote {
   firstPrice: number;
   marks: number;
+}
+
+/** Why a position gets closed on this batch, or null to hold it.
+ *  Checked in the brief's order: profit first, then the stop,
+ *  then time — the first trigger that fires is the reason. */
+function exitReason(
+  value: number,
+  cost: number,
+  batches: number,
+  params: Params,
+): string | null {
+  if (value >= cost * (1 + params.takeProfit)) return "take profit";
+  if (value <= cost * (1 - params.stopLoss)) return "stop loss";
+  if (batches > params.maxHoldBatches) return "time stop";
+  return null;
+}
+
+/** Why a curve is not entered on this batch, or null to enter it.
+ *  Mirrors the brief's entry list, in order. */
+function entryBlocker(
+  note: CurveNote | undefined,
+  real: number,
+  p: number,
+  params: Params,
+): string | null {
+  if (note === undefined || note.marks < params.minMarks) return "too new";
+  if (real < params.minRealSol) return "too thin";
+  if (p < note.firstPrice * (1 + params.entryLift)) return "no second wave";
+  if (p > note.firstPrice * (1 + params.maxLift)) return "already topped";
+  return null;
 }
 
 export function createStrategy(params: Params): Bot {
@@ -91,11 +135,7 @@ export function createStrategy(params: Params): Bot {
         const value = Number(pos.token_amount) * p;
         const cost = Number(pos.cost_lamports);
         if (cost <= 0) continue;
-        if (
-          value >= cost * (1 + params.takeProfit) ||
-          value <= cost * (1 - params.stopLoss) ||
-          batches > params.maxHoldBatches
-        ) {
+        if (exitReason(value, cost, batches, params) !== null) {
           orders.push({
             side: "sell",
             mint: pos.mint,
@@ -119,10 +159,8 @@ export function createStrategy(params: Params): Bot {
         if (slots <= 0) break;
         if (held.has(mint) || entered.has(mint)) continue;
         const note = notes.get(mint);
-        if (note === undefined || note.marks < params.minMarks) continue;
-        if ((realSol.get(mint) ?? 0) < params.minRealSol) continue;
-        if (p < note.firstPrice * (1 + params.entryLift)) continue;
-        if (p > note.firstPrice * (1 + params.maxLift)) continue;
+        if (entryBlocker(note, realSol.get(mint) ?? 0, p, params) !== null)
+          continue;
         const curve = state.curves.get(mint);
         if (curve === undefined || curve.complete) continue;
         const cap = state.maxBuyLamports(mint);
